@@ -1,6 +1,8 @@
 //! The [glyf (Glyph Data)](https://docs.microsoft.com/en-us/typography/opentype/spec/glyf) table
 
-use font_types::{BigEndian, FontRead, Offset32, OffsetHost, Tag};
+use std::ops::Mul;
+
+use font_types::{BigEndian, F2Dot14, FontRead, Offset32, OffsetHost, Tag};
 
 /// 'glyf'
 pub const TAG: Tag = Tag::new(b"glyf");
@@ -25,7 +27,6 @@ font_types::tables! {
         /// Maximum y for coordinate data.
         y_max: BigEndian<i16>,
     }
-
 
     /// The [Glyph Header](https://docs.microsoft.com/en-us/typography/opentype/spec/glyf#glyph-headers)
     SimpleGlyph<'a> {
@@ -137,12 +138,14 @@ font_types::tables! {
     /// [CompositeGlyph](https://docs.microsoft.com/en-us/typography/opentype/spec/glyf#glyph-headers)
     CompositeGlyph<'a> {
         header: GlyphHeader,
-        /// component flag
-        flags: BigEndian<CompositeGlyphFlags>,
-        /// glyph index of component
-        glyph_index: BigEndian<u16>,
+        //NOTE: it's easiest for us to just parse all of this manually.
         #[count_all]
-        offset_data: [u8],
+        component_data: [u8],
+
+        ///// component flag
+        //flags: BigEndian<CompositeGlyphFlags>,
+        ///// glyph index of component
+        //glyph_index: BigEndian<u16>,
 
         ///// x-offset for component or point number; type depends on bits 0
         ///// and 1 in component flags
@@ -256,6 +259,42 @@ impl<'a> Glyph<'a> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Point {
+    pub x: i16,
+    pub y: i16,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum GlyphPoint {
+    OffCurve(Point),
+    OnCurve(Point),
+    End(Point),
+}
+
+pub struct Bbox {
+    pub x_min: i16,
+    pub y_min: i16,
+    pub x_max: i16,
+    pub y_max: i16,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Transform {
+    scale_x: F2Dot14,
+    rotate1: F2Dot14,
+    rotate2: F2Dot14,
+    scale_y: F2Dot14,
+    translate_x: i16,
+    translate_y: i16,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Component {
+    pub base: u16,
+    pub transform: Transform,
+}
+
 impl<'a> SimpleGlyph<'a> {
     pub fn iter_points(&self) -> PointIter<'_> {
         self.iter_points_impl()
@@ -279,17 +318,12 @@ impl<'a> SimpleGlyph<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-pub struct Point {
-    pub x: i16,
-    pub y: i16,
-}
-
-#[derive(Clone, Copy, Debug)]
-pub enum GlyphPoint {
-    OffCurve(Point),
-    OnCurve(Point),
-    End(Point),
+impl<'a> CompositeGlyph<'a> {
+    pub fn iter(&self) -> ComponentIter<'_> {
+        ComponentIter {
+            data: Cursor::new(self.component_data()),
+        }
+    }
 }
 
 pub struct PointIter<'a> {
@@ -394,6 +428,115 @@ impl<'a> PointIter<'a> {
     }
 }
 
+pub struct ComponentIter<'a> {
+    data: Cursor<'a>,
+}
+
+impl<'a> Iterator for ComponentIter<'a> {
+    type Item = Component;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let flags = self.data.bump::<CompositeGlyphFlags>()?;
+        let glyph_id: u16 = self.data.bump()?;
+
+        let mut tform = Transform::default();
+
+        if flags.contains(CompositeGlyphFlags::ARGS_ARE_XY_VALUES) {
+            if flags.contains(CompositeGlyphFlags::ARG_1_AND_2_ARE_WORDS) {
+                tform.translate_x = self.data.bump()?;
+                tform.translate_y = self.data.bump()?;
+            } else {
+                tform.translate_x = self.data.bump::<i8>()? as i16;
+                tform.translate_y = self.data.bump::<i8>()? as i16;
+            }
+        }
+
+        if flags.contains(CompositeGlyphFlags::WE_HAVE_A_TWO_BY_TWO) {
+            tform.scale_x = self.data.bump()?;
+            tform.rotate1 = self.data.bump()?;
+            tform.rotate2 = self.data.bump()?;
+            tform.scale_y = self.data.bump()?;
+        } else if flags.contains(CompositeGlyphFlags::WE_HAVE_AN_X_AND_Y_SCALE) {
+            tform.scale_x = self.data.bump()?;
+            tform.scale_y = self.data.bump()?;
+        } else if flags.contains(CompositeGlyphFlags::WE_HAVE_A_SCALE) {
+            tform.scale_x = self.data.bump()?;
+            tform.scale_y = tform.scale_x;
+        }
+
+        if !flags.contains(CompositeGlyphFlags::MORE_COMPONENTS) {
+            self.data.seek(self.data.data.len());
+        }
+
+        Some(Component {
+            base: glyph_id,
+            transform: tform,
+        })
+    }
+}
+
+impl Mul<Point> for Transform {
+    type Output = Point;
+
+    fn mul(self, rhs: Point) -> Self::Output {
+        //TODO: I have zero idea if this is actually a good optimization
+        if self.translate_only() {
+            Point {
+                x: rhs.x.saturating_add(self.translate_x),
+                y: rhs.y.saturating_add(self.translate_y),
+            }
+        } else {
+            let x = rhs.x as f32;
+            let y = rhs.y as f32;
+            let [a, b, c, d, e, f] = self.to_floats();
+
+            let x = a * x + c * y + e;
+            let y = b * x + d * y + f;
+
+            Point {
+                x: x as i16,
+                y: y as i16,
+            }
+        }
+    }
+}
+
+impl Transform {
+    pub const IDENTITY: Transform = Transform {
+        scale_x: F2Dot14::ONE,
+        rotate1: F2Dot14::ZERO,
+        rotate2: F2Dot14::ZERO,
+        scale_y: F2Dot14::ONE,
+        translate_x: 0,
+        translate_y: 1,
+    };
+
+    #[inline]
+    pub fn translate_only(&self) -> bool {
+        self.scale_x == F2Dot14::ONE
+            && self.scale_y == F2Dot14::ONE
+            && self.rotate1 == F2Dot14::ZERO
+            && self.rotate2 == F2Dot14::ZERO
+    }
+
+    pub fn to_floats(&self) -> [f32; 6] {
+        [
+            self.scale_x.to_f32(),
+            self.rotate1.to_f32(),
+            self.rotate2.to_f32(),
+            self.scale_y.to_f32(),
+            self.translate_x as f32,
+            self.translate_y as f32,
+        ]
+    }
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
 //taken from ttf_parser https://docs.rs/ttf-parser/latest/src/ttf_parser/tables/glyf.rs.html#1-677
 /// Resolves coordinate arrays length.
 ///
@@ -480,8 +623,12 @@ impl<'a> Cursor<'a> {
 
     /// Attempt to read `T` at the current location, advancing if successful.
     fn bump<T: font_types::Scalar>(&mut self) -> Option<T> {
-        let r = BigEndian::<T>::read(self.data)?;
+        let r: BigEndian<T> = self.data.get(self.pos..).and_then(FontRead::read)?;
         self.pos += std::mem::size_of::<T::Raw>();
         Some(r.get())
+    }
+
+    fn seek(&mut self, pos: usize) {
+        self.pos = pos;
     }
 }

@@ -44,47 +44,7 @@ fn print_font_info(font: &FontRef) {
         let long_loca = head.index_to_loc_format() == 1;
         if let Some(loca) = font.loca(maxp.num_glyphs(), long_loca) {
             let glyf = font.glyf().expect("missing glyf table");
-            let mut simple_glyphs = 0;
-            let mut composite_glyphs = 0;
-            let mut total_points = 0;
-            let mut x_min = 0;
-            let mut y_min = 0;
-            let mut x_max = 0;
-            let mut y_max = 0;
-
-            println!("\nglyf/loca:");
-            for (i, offset) in loca
-                .iter()
-                .filter(|off| off.non_null().is_some())
-                .enumerate()
-            {
-                match glyf.resolve_glyph(offset) {
-                    Some(glyph) => {
-                        x_min = x_min.min(glyph.x_min());
-                        y_min = y_min.min(glyph.y_min());
-                        x_max = x_max.max(glyph.x_max());
-                        y_max = y_max.max(glyph.y_max());
-                        if let tables::glyf::Glyph::Simple(glyph) = glyph {
-                            simple_glyphs += 1;
-                            total_points += glyph.iter_points().count();
-                        } else {
-                            composite_glyphs += 1;
-                        }
-                    }
-                    None => {
-                        eprintln!("  unable to load glyph {} at {:?}", i, offset);
-                    }
-                }
-            }
-
-            println!("  simple glyphs: {}", simple_glyphs);
-            println!("  composite glyphs: {}", composite_glyphs);
-            println!("  total points: {}", total_points);
-
-            println!("  x_min: {}", x_min);
-            println!("  y_min: {}", y_min);
-            println!("  x_max: {}", x_max);
-            println!("  y_max: {}", y_max);
+            print_glyf_info(&loca, &glyf);
         }
     }
     if let Some(cmap) = font.cmap() {
@@ -123,6 +83,56 @@ fn print_hhea_info(hhea: &tables::hhea::Hhea) {
 fn print_maxp_info(maxp: &tables::maxp::Maxp) {
     println!("\nmaxp version {}", maxp.version());
     println!("  num_glyphs: {}", maxp.num_glyphs());
+}
+
+fn print_glyf_info(loca: &tables::loca::Loca, glyf: &tables::glyf::Glyf) {
+    let mut simple_glyphs = 0;
+    let mut composite_glyphs = 0;
+    let mut total_points = 0;
+    let mut total_components = 0;
+    let mut x_min = 0;
+    let mut y_min = 0;
+    let mut x_max = 0;
+    let mut y_max = 0;
+
+    println!("\nglyf/loca:");
+    for (i, offset) in loca
+        .iter()
+        .filter(|off| off.non_null().is_some())
+        .enumerate()
+    {
+        match glyf.resolve_glyph(offset) {
+            Some(glyph) => {
+                x_min = x_min.min(glyph.x_min());
+                y_min = y_min.min(glyph.y_min());
+                x_max = x_max.max(glyph.x_max());
+                y_max = y_max.max(glyph.y_max());
+                match glyph {
+                    tables::glyf::Glyph::Simple(glyph) => {
+                        simple_glyphs += 1;
+                        total_points += glyph.iter_points().count();
+                    }
+                    tables::glyf::Glyph::Composite(glyph) => {
+                        composite_glyphs += 1;
+                        total_components += glyph.iter().count();
+                    }
+                }
+            }
+            None => {
+                eprintln!("  unable to load glyph {} at {:?}", i, offset);
+            }
+        }
+    }
+
+    println!("  simple glyphs: {}", simple_glyphs);
+    println!("  composite glyphs: {}", composite_glyphs);
+    println!("  total points: {}", total_points);
+    println!("  total components: {}", total_components);
+
+    println!("  x_min: {}", x_min);
+    println!("  y_min: {}", y_min);
+    println!("  x_max: {}", x_max);
+    println!("  y_max: {}", y_max);
 }
 
 fn print_name_info(name: &tables::name::Name) {
