@@ -35,14 +35,14 @@ impl<'a> Loca<'a> {
     }
 
     /// Attempt to return the offset for a given glyph id.
-    pub fn get(&self, idx: usize) -> Option<Offset32> {
+    pub fn get(&self, idx: u16) -> Option<Offset32> {
         match self {
             Loca::Short(data) => {
-                let value = data.get(idx)?.get();
+                let value = data.get(idx as usize)?.get();
                 Some(Offset32::new(value as u32 * 2))
             }
 
-            Loca::Long(data) => data.get(idx).copied().map(BigEndian::get),
+            Loca::Long(data) => data.get(idx as usize).copied().map(BigEndian::get),
         }
     }
 

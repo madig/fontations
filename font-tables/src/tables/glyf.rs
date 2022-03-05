@@ -228,6 +228,57 @@ impl<'a> Glyf<'a> {
     pub fn resolve_glyph(&self, offset: Offset32) -> Option<Glyph<'a>> {
         self.resolve_offset(offset)
     }
+
+    pub fn compute_bbox(&self, loca: &super::loca::Loca, gid: u16) -> Option<Bbox> {
+        let mut ctx = BboxContext::default();
+        compute_bbox_impl(self, loca, &mut ctx, 0, gid);
+        (ctx.bbox != Bbox::default()).then(|| ctx.bbox)
+    }
+}
+
+#[derive(Default)]
+struct BboxContext {
+    bbox: Bbox,
+    transform: Transform,
+}
+
+impl BboxContext {
+    fn add_point(&mut self, point: Point) {
+        if self.transform == Transform::IDENTITY {
+            self.bbox.union_point(point);
+        } else {
+            self.bbox.union_point(self.transform * point);
+        }
+    }
+}
+
+// lifted from ttf-parser
+const MAX_DEPTH: usize = 32;
+
+fn compute_bbox_impl(
+    glyf: &Glyf,
+    loca: &super::loca::Loca,
+    ctx: &mut BboxContext,
+    depth: usize,
+    gid: u16,
+) {
+    if depth > MAX_DEPTH {
+        return;
+    }
+    let glyph = loca.get(gid).and_then(|off| glyf.resolve_glyph(off));
+    match glyph {
+        Some(Glyph::Simple(glyph)) => glyph.iter_points().for_each(|pt| ctx.add_point(pt.point())),
+        Some(Glyph::Composite(glyph)) => {
+            // recurse time:
+            for component in glyph.iter() {
+                let cur_xform = ctx.transform;
+                ctx.transform = ctx.transform * component.transform;
+                compute_bbox_impl(glyf, loca, ctx, depth + 1, component.base);
+                ctx.transform = cur_xform;
+            }
+        }
+        None => (),
+    }
 }
 
 impl<'a> Glyph<'a> {
@@ -257,6 +308,15 @@ impl<'a> Glyph<'a> {
     pub fn y_max(&self) -> i16 {
         self.header().y_max()
     }
+
+    pub fn bbox(&self) -> Bbox {
+        Bbox {
+            x_min: self.x_min(),
+            y_min: self.y_min(),
+            x_max: self.x_max(),
+            y_max: self.y_max(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -272,6 +332,7 @@ pub enum GlyphPoint {
     End(Point),
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Bbox {
     pub x_min: i16,
     pub y_min: i16,
@@ -279,7 +340,7 @@ pub struct Bbox {
     pub y_max: i16,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transform {
     scale_x: F2Dot14,
     rotate1: F2Dot14,
@@ -501,6 +562,31 @@ impl Mul<Point> for Transform {
     }
 }
 
+impl Mul for Transform {
+    type Output = Transform;
+
+    fn mul(self, rhs: Self) -> Self::Output {
+        let [l_0, l_1, l_2, l_3, l_4, l_5] = self.to_floats();
+        let [r_0, r_1, r_2, r_3, r_4, r_5] = rhs.to_floats();
+        let [scale_x, rotate1, rotate2, scale_y, translate_x, translate_y] = [
+            l_0 * r_0 + l_2 * r_1,
+            l_1 * r_0 + l_3 * r_1,
+            l_0 * r_2 + l_2 * r_3,
+            l_1 * r_2 + l_3 * r_3,
+            l_0 * r_4 + l_2 * r_5 + l_4,
+            l_1 * r_4 + l_3 * r_5 + l_5,
+        ];
+        Transform {
+            scale_x: F2Dot14::from_f32(scale_x),
+            rotate1: F2Dot14::from_f32(rotate1),
+            rotate2: F2Dot14::from_f32(rotate2),
+            scale_y: F2Dot14::from_f32(scale_y),
+            translate_x: translate_x as i16,
+            translate_y: translate_y as i16,
+        }
+    }
+}
+
 impl Transform {
     pub const IDENTITY: Transform = Transform {
         scale_x: F2Dot14::ONE,
@@ -534,6 +620,32 @@ impl Transform {
 impl Default for Transform {
     fn default() -> Self {
         Self::IDENTITY
+    }
+}
+
+impl Bbox {
+    fn union_point(&mut self, pt: Point) {
+        self.x_min = self.x_min.min(pt.x);
+        self.y_min = self.y_min.min(pt.y);
+        self.x_max = self.x_max.max(pt.x);
+        self.y_max = self.y_max.max(pt.y);
+    }
+
+    pub fn union(&mut self, other: Bbox) {
+        self.x_min = self.x_min.min(other.x_min);
+        self.y_min = self.y_min.min(other.y_min);
+        self.x_max = self.x_max.max(other.x_max);
+        self.y_max = self.y_max.max(other.y_max);
+    }
+}
+
+impl GlyphPoint {
+    fn point(self) -> Point {
+        match self {
+            GlyphPoint::OffCurve(pt) => pt,
+            GlyphPoint::OnCurve(pt) => pt,
+            GlyphPoint::End(pt) => pt,
+        }
     }
 }
 
