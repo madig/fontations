@@ -257,3 +257,10 @@ impl AsRef<[u8]> for FontData<'_> {
         self.bytes
     }
 }
+
+#[cfg(feature = "std")]
+impl<'a> From<FontData<'a>> for std::borrow::Cow<'a, [u8]> {
+    fn from(obj: FontData<'a>) -> Self {
+        obj.bytes.into()
+    }
+}
