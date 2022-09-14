@@ -771,24 +771,43 @@ impl Field {
     }
 
     fn compile_write_stmt(&self) -> TokenStream {
+        let mut computed = true;
         let value_expr = if let Some(format) = &self.attrs.format {
             let typ = self.typ.cooked_type_tokens();
-            quote!( (#format as #typ) )
+            quote!(#format as #typ)
         } else if let Some(computed) = &self.attrs.compile {
             let typ = self.typ.cooked_type_tokens();
             let expr = computed.compile_expr();
             if !computed.referenced_fields.is_empty() {
-                quote!( (#expr.unwrap() as #typ) )
+                quote!(#expr.unwrap() as #typ)
             } else {
-                quote!( (#expr as #typ) )
+                quote!(#expr as #typ)
             }
             // not computed
         } else {
+            computed = false;
             let name = &self.name;
             quote!( self.#name )
         };
 
-        quote!(#value_expr.write_into(writer))
+        if self.attrs.version.is_some() {
+            quote! {
+                let version = #value_expr;
+                version.write_into(writer)
+            }
+        } else {
+            let value_expr = if computed {
+                quote!((#value_expr))
+            } else {
+                value_expr
+            };
+
+            if let Some(avail) = self.attrs.available.as_ref() {
+                quote!(version.compatible(#avail).then(|| #value_expr.write_into(writer)))
+            } else {
+                quote!(#value_expr.write_into(writer))
+            }
+        }
     }
 
     fn compile_write_contains_int_cast(&self) -> bool {
