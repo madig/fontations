@@ -3,10 +3,15 @@
 //! This accepts command line arguments similar to what is present in ttx,
 //! although it does not produce xml output.
 
-use std::{collections::HashSet, str::FromStr};
+use std::{
+    collections::{BTreeMap, HashSet},
+    str::FromStr,
+};
 
 use font_types::Tag;
-use read_fonts::{traversal::SomeTable, FontData, FontRef, ReadError, TableProvider};
+use read_fonts::{
+    tables::cmap::CmapSubtable, traversal::SomeTable, FontData, FontRef, ReadError, TableProvider,
+};
 
 mod print;
 mod query;
@@ -22,6 +27,10 @@ fn main() -> Result<(), Error> {
     if args.list {
         list_tables(&font);
         return Ok(());
+    }
+
+    if args.print_cmap {
+        return print_cmap(&font);
     }
 
     if let Some(query) = &args.query {
@@ -49,6 +58,25 @@ fn list_tables(font: &FontRef) {
             record.checksum()
         );
     }
+}
+
+fn print_cmap(font: &FontRef) -> Result<(), Error> {
+    let cmap = font.cmap()?;
+    let cmap4 = cmap
+        .encoding_records()
+        .iter()
+        .find_map(|rec| match rec.subtable(cmap.offset_data()) {
+            Ok(CmapSubtable::Format4(table)) => Some(table),
+            _ => None,
+        })
+        .ok_or_else(|| Error::new("no cmap4 subtable found"))?;
+
+    let reversemap = cmap4.reversed().collect::<BTreeMap<_, _>>();
+    for (gid, chr) in reversemap {
+        println!("{:<6}{chr:6}U+{:04}", gid.to_u16(), chr as u32)
+    }
+
+    Ok(())
 }
 
 fn print_tables(font: &FontRef, filter: &TableFilter) {
@@ -168,6 +196,12 @@ impl std::fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
+impl From<ReadError> for Error {
+    fn from(src: ReadError) -> Error {
+        Error::new(src)
+    }
+}
+
 fn fancy_print_table<'a>(table: &(dyn SomeTable<'a> + 'a)) -> std::io::Result<()> {
     let stdout = std::io::stdout();
     let mut locked = stdout.lock();
@@ -188,7 +222,7 @@ mod flags {
                 optional -q, --query query: Query
                 optional -t, --tables include: String
                 optional -x, --exclude exclude: String
+                optional --print-cmap
             }
-
     }
 }
